@@ -279,9 +279,13 @@
 
                         <!-- Audience Audio Unlock / Reaction Bar (Visible to Audience) -->
                         <div id="audience-controls-bar" class="hidden mt-5 pt-5 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-4">
-                            <div class="flex items-center gap-2 text-xs text-zinc-400">
+                            <div class="flex items-center gap-3 text-xs text-zinc-400">
                                 <i data-lucide="volume-2" class="w-4 h-4 text-emerald-400"></i>
-                                <span>Listening to live stage broadcast</span>
+                                <span id="audience-audio-status">Listening to live stage broadcast</span>
+                                <button id="btn-unlock-audio" onclick="unlockAudienceAudio()" class="hidden px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-xs transition animate-pulse">
+                                    🔊 Unmute Stage Audio
+                                </button>
+                                <audio id="remote-stage-audio" autoplay playsinline class="hidden"></audio>
                             </div>
                             <div class="flex items-center gap-2">
                                 <span class="text-xs text-zinc-500 mr-1">Send Vibe:</span>
@@ -878,6 +882,7 @@
         let analyserNode = null;
         let karaokeInterval = null;
         let karaokeGainNode = null;
+        let carrierOscillator = null;
         let ytPlayer = null;
         let ytPlayerReady = false;
         let ytCurrentVideo = null;
@@ -1208,6 +1213,7 @@
                         if (data.type === 'AUTH_JOIN') {
                             const validPass = normalizePass(data.password) === normalizePass(room.password);
                             if (validPass) {
+                                initAudioEngine();
                                 peerDataConnections[conn.peer] = conn;
                                 conn.send({
                                     type: 'AUTH_OK',
@@ -1215,7 +1221,7 @@
                                 });
                                 appendSystemMessage(`${data.userName || 'Listener'} joined via Event Code.`);
                                 updateListenerCount(1);
-                                // Also stream mixed WebRTC studio audio to this listener via PeerJS MediaConnection
+                                // Stream mixed WebRTC studio audio to this listener via PeerJS MediaConnection
                                 if (masterStreamDestination && masterStreamDestination.stream) {
                                     try { peer.call(conn.peer, masterStreamDestination.stream); } catch (e) { /* ignore */ }
                                 }
@@ -1302,17 +1308,7 @@
                     clientPeer.on('call', (call) => {
                         call.answer();
                         call.on('stream', (remoteStream) => {
-                            const remoteAudio = new Audio();
-                            remoteAudio.srcObject = remoteStream;
-                            remoteAudio.autoplay = true;
-                            remoteAudio.play().catch(() => {});
-                            if (audioCtx && analyserNode) {
-                                try {
-                                    const src = audioCtx.createMediaStreamSource(remoteStream);
-                                    src.connect(analyserNode);
-                                    document.getElementById('visualizer-overlay-text').classList.add('hidden');
-                                } catch (e) { /* ignore */ }
-                            }
+                            attachRemoteAudioStream(remoteStream);
                         });
                     });
 
@@ -1425,6 +1421,14 @@
 
             // Notify host & room peers via BroadcastChannel
             postSignal({
+                type: 'PEER_JOINED',
+                sender: state.peerId,
+                code: targetRoom.code,
+                userName
+            });
+
+            // Also send PeerJS notification if connected
+            broadcastPeerData({
                 type: 'PEER_JOINED',
                 sender: state.peerId,
                 code: targetRoom.code,
@@ -1626,6 +1630,14 @@
                 analyserNode = audioCtx.createAnalyser();
                 analyserNode.fftSize = 128;
 
+                // Keep a silent carrier signal active so WebRTC always negotiates a live audio track
+                carrierOscillator = audioCtx.createOscillator();
+                const silentGain = audioCtx.createGain();
+                silentGain.gain.value = 0.00001;
+                carrierOscillator.connect(silentGain);
+                silentGain.connect(masterStreamDestination);
+                carrierOscillator.start();
+
                 // Karaoke Backing Track Bus
                 karaokeGainNode = audioCtx.createGain();
                 karaokeGainNode.gain.value = 0.55;
@@ -1712,6 +1724,13 @@
                             }
                         });
                     });
+
+                    // Also ensure any PeerJS data connections receive a fresh media call if needed
+                    if (hostPeerInstance && masterStreamDestination && masterStreamDestination.stream) {
+                        Object.keys(peerDataConnections).forEach(pid => {
+                            try { hostPeerInstance.call(pid, masterStreamDestination.stream); } catch (e) { /* ignore */ }
+                        });
+                    }
 
                     state.micEnabled = true;
                     btn.className = 'px-4 py-2.5 rounded-xl font-semibold text-sm bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-600/25 transition flex items-center gap-2';
@@ -2546,17 +2565,8 @@
             peerConnections[senderPeerId] = pc;
 
             pc.ontrack = (event) => {
-                const remoteAudio = new Audio();
-                remoteAudio.srcObject = event.streams[0];
-                remoteAudio.autoplay = true;
-                remoteAudio.play().catch(() => {});
-                if (audioCtx && analyserNode) {
-                    try {
-                        const src = audioCtx.createMediaStreamSource(event.streams[0]);
-                        src.connect(analyserNode);
-                        document.getElementById('visualizer-overlay-text').classList.add('hidden');
-                    } catch (e) { /* ignore */ }
-                }
+                const stream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
+                attachRemoteAudioStream(stream);
             };
 
             pc.onicecandidate = (event) => {
@@ -2579,6 +2589,58 @@
                 target: senderPeerId,
                 answer
             });
+        }
+
+        function attachRemoteAudioStream(stream) {
+            if (!stream) return;
+            const audioEl = document.getElementById('remote-stage-audio');
+            const unlockBtn = document.getElementById('btn-unlock-audio');
+            const statusEl = document.getElementById('audience-audio-status');
+
+            if (audioEl) {
+                audioEl.srcObject = stream;
+                audioEl.muted = false;
+                audioEl.volume = 1.0;
+                const playPromise = audioEl.play();
+                if (playPromise !== undefined) {
+                    playPromise.then(() => {
+                        if (unlockBtn) unlockBtn.classList.add('hidden');
+                        if (statusEl) statusEl.textContent = 'Connected • Live Stage Audio Playing';
+                    }).catch(() => {
+                        if (unlockBtn) unlockBtn.classList.remove('hidden');
+                        if (statusEl) statusEl.textContent = 'Tap "Unmute Stage Audio" to hear the host';
+                    });
+                }
+            }
+
+            if (audioCtx && analyserNode) {
+                try {
+                    const src = audioCtx.createMediaStreamSource(stream);
+                    src.connect(analyserNode);
+                    document.getElementById('visualizer-overlay-text').classList.add('hidden');
+                } catch (e) { /* ignore */ }
+            }
+        }
+
+        function unlockAudienceAudio() {
+            initAudioEngine();
+            const audioEl = document.getElementById('remote-stage-audio');
+            const unlockBtn = document.getElementById('btn-unlock-audio');
+            const statusEl = document.getElementById('audience-audio-status');
+            if (audioEl) {
+                audioEl.play().then(() => {
+                    if (unlockBtn) unlockBtn.classList.add('hidden');
+                    if (statusEl) statusEl.textContent = 'Connected • Live Stage Audio Playing';
+                    showToast('Stage audio unlocked!', 'success');
+                }).catch(() => {});
+            }
+            const directAudioEl = document.getElementById('yt-direct-audio');
+            if (ytUsingDirectAudio && directAudioEl) {
+                directAudioEl.play().catch(() => {});
+            }
+            if (ytPlayer && typeof ytPlayer.playVideo === 'function') {
+                try { ytPlayer.playVideo(); } catch (e) { /* ignore */ }
+            }
         }
 
         function spawnFloatingEmoji(emoji) {
