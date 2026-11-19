@@ -2265,6 +2265,322 @@
             }
         }
 
+        function stopYouTubeAudio() {
+            const directAudioEl = document.getElementById('yt-direct-audio');
+            if (directAudioEl) {
+                directAudioEl.pause();
+                directAudioEl.src = '';
+            }
+            if (ytPlayer && typeof ytPlayer.stopVideo === 'function') {
+                try { ytPlayer.stopVideo(); } catch (e) { /* ignore */ }
+            }
+            setYouTubePlayButtonUI(false);
+            if (state.role === 'host' && ytCurrentVideo) {
+                broadcastYouTubeSync('STOP', ytCurrentVideo);
+            }
+        }
+
+        function setYouTubePlayButtonUI(isPlaying) {
+            const btn = document.getElementById('yt-play-pause-btn');
+            const label = document.getElementById('yt-play-pause-label');
+            if (!btn || !label) return;
+            if (isPlaying) {
+                btn.className = 'px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-xs transition flex items-center gap-1.5';
+                label.textContent = 'Pause';
+            } else {
+                btn.className = 'px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-xs transition flex items-center gap-1.5';
+                label.textContent = 'Play';
+            }
+        }
+
+        function updateYouTubeVolume(val) {
+            const numeric = parseInt(val, 10);
+            const directAudioEl = document.getElementById('yt-direct-audio');
+            if (directAudioEl) {
+                directAudioEl.volume = numeric / 100;
+            }
+            if (ytPlayer && typeof ytPlayer.setVolume === 'function') {
+                try { ytPlayer.setVolume(numeric); } catch (e) { /* ignore */ }
+            }
+        }
+
+        function broadcastYouTubeSync(action, track) {
+            if (!state.currentRoom || state.role !== 'host') return;
+            const payload = {
+                type: 'YT_KARAOKE_SYNC',
+                sender: state.peerId,
+                code: state.currentRoom.code,
+                action,
+                track
+            };
+            postSignal(payload);
+            broadcastPeerData(payload);
+        }
+
+        function handleAudienceYouTubeSync(msg) {
+            if (!msg || !msg.track) return;
+            switchKaraokeSource('youtube');
+            if (msg.action === 'LOAD_AND_PLAY') {
+                loadYouTubeKaraokeTrack(msg.track);
+            } else if (msg.action === 'PLAY') {
+                const directAudioEl = document.getElementById('yt-direct-audio');
+                if (ytUsingDirectAudio && directAudioEl) directAudioEl.play().catch(() => {});
+                else if (ytPlayer && typeof ytPlayer.playVideo === 'function') ytPlayer.playVideo();
+            } else if (msg.action === 'PAUSE') {
+                const directAudioEl = document.getElementById('yt-direct-audio');
+                if (ytUsingDirectAudio && directAudioEl) directAudioEl.pause();
+                else if (ytPlayer && typeof ytPlayer.pauseVideo === 'function') ytPlayer.pauseVideo();
+            } else if (msg.action === 'STOP') {
+                stopYouTubeAudio();
+            }
+        }
+
+        /**
+         * ============================================================================
+         * WEB AUDIO SYNTHESIZER HELPERS & LIVE VISUALIZER
+         * ============================================================================
+         */
+        function triggerSynthKick(time) {
+            if (!audioCtx || !karaokeGainNode) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(140, time);
+            osc.frequency.exponentialRampToValueAtTime(42, time + 0.14);
+            gain.gain.setValueAtTime(0.65, time);
+            gain.gain.exponentialRampToValueAtTime(0.001, time + 0.25);
+            osc.connect(gain);
+            gain.connect(karaokeGainNode);
+            osc.start(time);
+            osc.stop(time + 0.26);
+        }
+
+        function triggerSynthHat(time, level = 0.08) {
+            if (!audioCtx || !karaokeGainNode) return;
+            const bufferSize = audioCtx.sampleRate * 0.04;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = audioCtx.createBufferSource();
+            noise.buffer = buffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'highpass';
+            filter.frequency.value = 7000;
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(level, time);
+            gain.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
+            noise.connect(filter);
+            filter.connect(gain);
+            gain.connect(karaokeGainNode);
+            noise.start(time);
+        }
+
+        function triggerSynthChord(freqs, time, duration) {
+            if (!audioCtx || !karaokeGainNode) return;
+            freqs.forEach(freq => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(freq, time);
+                gain.gain.setValueAtTime(0.001, time);
+                gain.gain.linearRampToValueAtTime(0.11, time + 0.08);
+                gain.gain.exponentialRampToValueAtTime(0.001, time + duration);
+                osc.connect(gain);
+                gain.connect(karaokeGainNode);
+                osc.start(time);
+                osc.stop(time + duration + 0.02);
+            });
+        }
+
+        function playSoundCue(type) {
+            initAudioEngine();
+            const now = audioCtx.currentTime;
+            document.getElementById('visualizer-overlay-text').classList.add('hidden');
+            if (type === 'rimshot') {
+                triggerSynthKick(now);
+                triggerSynthHat(now + 0.14, 0.25);
+                triggerSynthKick(now + 0.28);
+                triggerSynthHat(now + 0.45, 0.35);
+            } else if (type === 'snap') {
+                triggerSynthHat(now, 0.25);
+                triggerSynthHat(now + 0.25, 0.25);
+            } else if (type === 'airhorn') {
+                [466.16, 587.33, 698.46].forEach(f => triggerSynthChord([f], now, 0.55));
+            } else {
+                for (let i = 0; i < 8; i++) triggerSynthHat(now + i * 0.07, 0.18);
+            }
+        }
+
+        function startVisualizerLoop() {
+            const canvas = document.getElementById('audio-visualizer');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const renderFrame = () => {
+                if (!state.currentRoom) return;
+                requestAnimationFrame(renderFrame);
+                const width = canvas.width = canvas.offsetWidth || 600;
+                const height = canvas.height = canvas.offsetHeight || 112;
+                ctx.clearRect(0, 0, width, height);
+
+                if (!analyserNode) return;
+                const bufferLength = analyserNode.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                analyserNode.getByteFrequencyData(dataArray);
+
+                const barWidth = (width / bufferLength) * 1.6;
+                let x = 0;
+                for (let i = 0; i < bufferLength; i++) {
+                    const barHeight = (dataArray[i] / 255) * (height * 0.85);
+                    const gradient = ctx.createLinearGradient(0, height, 0, height - barHeight);
+                    gradient.addColorStop(0, '#7c3aed');
+                    gradient.addColorStop(1, '#e879f9');
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(x, height - barHeight, Math.max(2, barWidth - 2), barHeight);
+                    x += barWidth + 1;
+                }
+            };
+            renderFrame();
+        }
+
+        /**
+         * ============================================================================
+         * LIVE CHAT, REACTIONS & WEBRTC AUDIO SIGNALING
+         * ============================================================================
+         */
+        function handleSendChat(e) {
+            e.preventDefault();
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text || !state.currentRoom) return;
+            input.value = '';
+
+            const isHost = state.role === 'host';
+            appendChatMessage(state.userName, text, isHost);
+
+            const payload = {
+                type: 'CHAT_MESSAGE',
+                sender: state.peerId,
+                code: state.currentRoom.code,
+                author: state.userName,
+                text,
+                isHost
+            };
+            postSignal(payload);
+            broadcastPeerData(payload);
+        }
+
+        function appendChatMessage(author, text, isHost = false) {
+            const box = document.getElementById('chat-messages');
+            if (!box) return;
+            const row = document.createElement('div');
+            row.className = 'rounded-2xl bg-zinc-950/90 border border-zinc-800/80 p-3 space-y-1';
+            row.innerHTML = `
+                <div class="flex items-center gap-2">
+                    <span class="text-xs font-bold ${isHost ? 'text-amber-400' : 'text-violet-300'}">${escapeHtml(author)}</span>
+                    ${isHost ? '<span class="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">Host</span>' : ''}
+                </div>
+                <p class="text-xs text-zinc-200 leading-relaxed break-words">${escapeHtml(text)}</p>
+            `;
+            box.appendChild(row);
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function appendSystemMessage(text) {
+            const box = document.getElementById('chat-messages');
+            if (!box) return;
+            const row = document.createElement('div');
+            row.className = 'text-[11px] text-zinc-400 bg-zinc-800/40 rounded-xl px-3 py-2 text-center';
+            row.textContent = text;
+            box.appendChild(row);
+            box.scrollTop = box.scrollHeight;
+        }
+
+        function sendReaction(emoji) {
+            spawnFloatingEmoji(emoji);
+            if (!state.currentRoom) return;
+            const payload = {
+                type: 'REACTION',
+                sender: state.peerId,
+                code: state.currentRoom.code,
+                emoji
+            };
+            postSignal(payload);
+            broadcastPeerData(payload);
+        }
+
+        async function initiateWebRTCOffer(targetPeerId) {
+            initAudioEngine();
+            const pc = new RTCPeerConnection(ICE_SERVERS);
+            peerConnections[targetPeerId] = pc;
+
+            if (masterStreamDestination && masterStreamDestination.stream) {
+                masterStreamDestination.stream.getTracks().forEach(track => {
+                    pc.addTrack(track, masterStreamDestination.stream);
+                });
+            }
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    postSignal({
+                        type: 'WEBRTC_ICE',
+                        sender: state.peerId,
+                        target: targetPeerId,
+                        candidate: event.candidate
+                    });
+                }
+            };
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            postSignal({
+                type: 'WEBRTC_OFFER',
+                sender: state.peerId,
+                target: targetPeerId,
+                offer
+            });
+        }
+
+        async function handleWebRTCOffer(senderPeerId, offer) {
+            initAudioEngine();
+            const pc = new RTCPeerConnection(ICE_SERVERS);
+            peerConnections[senderPeerId] = pc;
+
+            pc.ontrack = (event) => {
+                const remoteAudio = new Audio();
+                remoteAudio.srcObject = event.streams[0];
+                remoteAudio.autoplay = true;
+                remoteAudio.play().catch(() => {});
+                if (audioCtx && analyserNode) {
+                    try {
+                        const src = audioCtx.createMediaStreamSource(event.streams[0]);
+                        src.connect(analyserNode);
+                        document.getElementById('visualizer-overlay-text').classList.add('hidden');
+                    } catch (e) { /* ignore */ }
+                }
+            };
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    postSignal({
+                        type: 'WEBRTC_ICE',
+                        sender: state.peerId,
+                        target: senderPeerId,
+                        candidate: event.candidate
+                    });
+                }
+            };
+
+            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            postSignal({
+                type: 'WEBRTC_ANSWER',
+                sender: state.peerId,
+                target: senderPeerId,
+                answer
+            });
+        }
+
         function spawnFloatingEmoji(emoji) {
             const container = document.getElementById('reactions-canvas');
             if (!container) return;
