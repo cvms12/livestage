@@ -445,8 +445,10 @@
 
                                     <!-- Native HTML5 Audio Element (for direct audio stream) + Compact Hidden/Audio-mode YouTube IFrame Fallback -->
                                     <audio id="yt-direct-audio" crossorigin="anonymous" class="hidden"></audio>
-                                    <div id="yt-iframe-container" class="hidden rounded-lg overflow-hidden border border-zinc-800 h-20 bg-black">
+                                    <div id="yt-iframe-container" class="relative hidden rounded-lg overflow-hidden border border-zinc-800 h-20 bg-black">
                                         <div id="yt-player-placeholder"></div>
+                                        <!-- Transparent shield blocks audience listeners from clicking play/pause on the iframe -->
+                                        <div id="yt-audience-click-shield" class="hidden absolute inset-0 z-10 bg-transparent cursor-not-allowed" title="Playback is controlled by the Host"></div>
                                     </div>
                                 </div>
                             </div>
@@ -1453,6 +1455,9 @@
 
             const roleBadge = document.getElementById('room-role-badge');
             const endEventBtn = document.getElementById('btn-end-event');
+            const sourceSwitcher = document.getElementById('tab-karaoke-builtin')?.parentElement;
+            const ytShield = document.getElementById('yt-audience-click-shield');
+
             if (state.role === 'host') {
                 roleBadge.textContent = 'HOST STAGE';
                 roleBadge.className = 'px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30';
@@ -1462,6 +1467,9 @@
                 document.getElementById('vocal-fx-section').classList.remove('hidden');
                 document.getElementById('karaoke-transport-controls').classList.remove('hidden');
                 document.getElementById('karaoke-mixer-bar').classList.remove('hidden');
+                document.getElementById('karaoke-track-select').disabled = false;
+                if (sourceSwitcher) sourceSwitcher.classList.remove('hidden');
+                if (ytShield) ytShield.classList.add('hidden');
                 document.getElementById('yt-search-form').classList.remove('hidden');
                 document.getElementById('yt-search-results').classList.remove('hidden');
                 document.getElementById('yt-host-controls').classList.remove('hidden');
@@ -1474,6 +1482,9 @@
                 document.getElementById('vocal-fx-section').classList.add('hidden');
                 document.getElementById('karaoke-transport-controls').classList.add('hidden');
                 document.getElementById('karaoke-mixer-bar').classList.add('hidden');
+                document.getElementById('karaoke-track-select').disabled = true;
+                if (sourceSwitcher) sourceSwitcher.classList.add('hidden');
+                if (ytShield) ytShield.classList.remove('hidden');
                 document.getElementById('yt-search-form').classList.add('hidden');
                 document.getElementById('yt-search-results').classList.add('hidden');
                 document.getElementById('yt-host-controls').classList.add('hidden');
@@ -1499,13 +1510,10 @@
             startVisualizerLoop();
             lucide.createIcons();
 
-            // Automatically start live YouTube karaoke audio stream if entering a featured Music room
+            // Automatically start live YouTube karaoke audio stream if entering a featured/active Music room (listen-only for audience)
             const autoTrack = room.autoYouTubeTrack || room.activeYouTubeTrack;
             if (room.category === 'music' && autoTrack) {
                 switchKaraokeSource('youtube');
-                // Allow listeners in featured music rooms to also test the Studio Mic & Vocal FX
-                document.getElementById('host-mic-bar').classList.remove('hidden');
-                document.getElementById('vocal-fx-section').classList.remove('hidden');
                 loadYouTubeKaraokeTrack(autoTrack);
             }
         }
@@ -2166,6 +2174,7 @@
 
         function playViaYouTubeIFrame(videoId) {
             const vol = parseInt(document.getElementById('yt-vol-slider').value, 10) || 65;
+            const isAudience = state.role !== 'host';
             if (ytPlayer && typeof ytPlayer.loadVideoById === 'function') {
                 ytPlayer.loadVideoById(videoId);
                 ytPlayer.setVolume(vol);
@@ -2177,7 +2186,8 @@
                     videoId: videoId,
                     playerVars: {
                         autoplay: 1,
-                        controls: 1,
+                        controls: isAudience ? 0 : 1,
+                        disablekb: isAudience ? 1 : 0,
                         rel: 0,
                         modestbranding: 1
                     },
@@ -2196,6 +2206,7 @@
 
         function playViaYouTubeSearchQuery(query) {
             const vol = parseInt(document.getElementById('yt-vol-slider').value, 10) || 65;
+            const isAudience = state.role !== 'host';
             if (ytPlayer && typeof ytPlayer.loadPlaylist === 'function') {
                 ytPlayer.loadPlaylist({ listType: 'search', list: query });
                 ytPlayer.setVolume(vol);
@@ -2208,7 +2219,8 @@
                         listType: 'search',
                         list: query,
                         autoplay: 1,
-                        controls: 1,
+                        controls: isAudience ? 0 : 1,
+                        disablekb: isAudience ? 1 : 0,
                         rel: 0,
                         modestbranding: 1
                     },
@@ -2224,364 +2236,31 @@
             }
         }
 
-        function stopYouTubeAudio() {
+        function toggleYouTubeAudioPlay() {
+            if (state.role !== 'host' || !ytCurrentVideo) return;
             const directAudioEl = document.getElementById('yt-direct-audio');
-            if (directAudioEl) {
-                directAudioEl.pause();
-                directAudioEl.currentTime = 0;
-            }
-            if (ytPlayer && typeof ytPlayer.stopVideo === 'function') {
-                ytPlayer.stopVideo();
-            }
-            setYouTubePlayButtonUI(false);
-            broadcastYouTubeSync('STOP', ytCurrentVideo);
-        }
-
-        function updateYouTubeVolume(val) {
-            const vol = parseInt(val, 10);
-            const directAudioEl = document.getElementById('yt-direct-audio');
-            if (directAudioEl) directAudioEl.volume = vol / 100;
-            if (ytPlayer && typeof ytPlayer.setVolume === 'function') {
-                ytPlayer.setVolume(vol);
-            }
-        }
-
-        function setYouTubePlayButtonUI(isPlaying) {
-            const label = document.getElementById('yt-play-pause-label');
-            if (label) label.textContent = isPlaying ? 'Pause' : 'Play';
-        }
-
-        function broadcastYouTubeSync(action, track) {
-            if (state.currentRoom && state.role === 'host' && track) {
-                const syncPayload = {
-                    type: 'YT_KARAOKE_SYNC',
-                    sender: state.peerId,
-                    code: state.currentRoom.code,
-                    action,
-                    track,
-                    usingDirectAudio: ytUsingDirectAudio
-                };
-                postSignal(syncPayload);
-                broadcastPeerData(syncPayload);
-            }
-        }
-
-        function handleAudienceYouTubeSync(msg) {
-            // Switch audience view to YouTube panel automatically so they see what's playing
-            document.getElementById('karaoke-builtin-panel').classList.add('hidden');
-            document.getElementById('karaoke-youtube-panel').classList.remove('hidden');
-            document.getElementById('yt-audio-deck').classList.remove('hidden');
-            document.getElementById('yt-now-playing-title').textContent = msg.track.title;
-
-            // If host is using pure WebRTC direct audio stream, audience already hears it via WebRTC!
-            if (msg.usingDirectAudio) {
-                document.getElementById('yt-iframe-container').classList.add('hidden');
-                document.getElementById('yt-stream-mode-label').textContent = 'Streaming live from host stage';
+            if (ytUsingDirectAudio && directAudioEl) {
+                if (directAudioEl.paused) {
+                    directAudioEl.play();
+                    setYouTubePlayButtonUI(true);
+                    broadcastYouTubeSync('PLAY', ytCurrentVideo);
+                } else {
+                    directAudioEl.pause();
+                    setYouTubePlayButtonUI(false);
+                    broadcastYouTubeSync('PAUSE', ytCurrentVideo);
+                }
                 return;
             }
-
-            // Otherwise sync YouTube IFrame playback on audience device
-            const iframeContainer = document.getElementById('yt-iframe-container');
-            iframeContainer.classList.remove('hidden');
-            if (msg.action === 'LOAD_AND_PLAY') {
-                if (msg.track.videoId) {
-                    playViaYouTubeIFrame(msg.track.videoId);
-                } else if (msg.track.searchQuery) {
-                    playViaYouTubeSearchQuery(msg.track.searchQuery);
-                }
-            } else if (msg.action === 'PLAY' && ytPlayer?.playVideo) {
-                ytPlayer.playVideo();
-            } else if (msg.action === 'PAUSE' && ytPlayer?.pauseVideo) {
-                ytPlayer.pauseVideo();
-            } else if (msg.action === 'STOP' && ytPlayer?.stopVideo) {
-                ytPlayer.stopVideo();
-            }
-        }
-
-        // Synthesized Karaoke Instruments (Zero external audio file dependencies!)
-        function triggerSynthKick(time) {
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
-            osc.type = 'sine';
-            osc.frequency.setValueAtTime(135, time);
-            osc.frequency.exponentialRampToValueAtTime(42, time + 0.14);
-
-            gain.gain.setValueAtTime(0.45, time);
-            gain.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
-
-            osc.connect(gain);
-            gain.connect(karaokeGainNode);
-            osc.start(time);
-            osc.stop(time + 0.19);
-        }
-
-        function triggerSynthHat(time, volume) {
-            const bufferSize = audioCtx.sampleRate * 0.04;
-            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-            const data = buffer.getChannelData(0);
-            for (let i = 0; i < bufferSize; i++) {
-                data[i] = Math.random() * 2 - 1;
-            }
-            const noise = audioCtx.createBufferSource();
-            noise.buffer = buffer;
-
-            const filter = audioCtx.createBiquadFilter();
-            filter.type = 'highpass';
-            filter.frequency.value = 7000;
-
-            const gain = audioCtx.createGain();
-            gain.gain.setValueAtTime(volume, time);
-            gain.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
-
-            noise.connect(filter);
-            filter.connect(gain);
-            gain.connect(karaokeGainNode);
-            noise.start(time);
-        }
-
-        function triggerSynthChord(freqs, time, duration) {
-            freqs.forEach(freq => {
-                const osc = audioCtx.createOscillator();
-                const gain = audioCtx.createGain();
-                osc.type = 'triangle';
-                osc.frequency.setValueAtTime(freq, time);
-
-                gain.gain.setValueAtTime(0.001, time);
-                gain.gain.linearRampToValueAtTime(0.11, time + 0.15);
-                gain.gain.exponentialRampToValueAtTime(0.001, time + duration);
-
-                osc.connect(gain);
-                gain.connect(karaokeGainNode);
-                osc.start(time);
-                osc.stop(time + duration + 0.05);
-            });
-        }
-
-        // Category Stage Soundboard Cues (Standup, Jokes, Poetry)
-        function playSoundCue(type) {
-            initAudioEngine();
-            const now = audioCtx.currentTime;
-
-            if (type === 'rimshot') {
-                // Ba-dum-tss!
-                triggerSynthKick(now);
-                triggerSynthKick(now + 0.16);
-                triggerSynthHat(now + 0.34, 0.35);
-                sendReaction('🥁');
-            } else if (type === 'applause' || type === 'snap') {
-                for (let i = 0; i < 14; i++) {
-                    triggerSynthHat(now + i * 0.06, type === 'applause' ? 0.16 : 0.09);
-                }
-                sendReaction(type === 'applause' ? '👏' : '🫰');
-            } else if (type === 'airhorn') {
-                const osc = audioCtx.createOscillator();
-                const gain = audioCtx.createGain();
-                osc.type = 'sawtooth';
-                osc.frequency.setValueAtTime(480, now);
-                osc.frequency.linearRampToValueAtTime(510, now + 0.35);
-                gain.gain.setValueAtTime(0.2, now);
-                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
-                osc.connect(gain);
-                gain.connect(audioCtx.destination);
-                osc.start(now);
-                osc.stop(now + 0.46);
-                sendReaction('📯');
-            }
-        }
-
-        /**
-         * ============================================================================
-         * WEBRTC REAL-TIME AUDIO BROADCASTING (HOST -> AUDIENCE PEERS)
-         * ============================================================================
-         */
-        async function initiateWebRTCOffer(targetPeerId) {
-            initAudioEngine();
-            const pc = new RTCPeerConnection(ICE_SERVERS);
-            peerConnections[targetPeerId] = pc;
-
-            // Add the mixed studio audio stream (Processed Vocals + Karaoke Track)
-            if (masterStreamDestination && masterStreamDestination.stream) {
-                masterStreamDestination.stream.getTracks().forEach(track => {
-                    pc.addTrack(track, masterStreamDestination.stream);
-                });
-            }
-
-            pc.onicecandidate = (e) => {
-                if (e.candidate) {
-                    signalChannel.postMessage({
-                        type: 'WEBRTC_ICE',
-                        sender: state.peerId,
-                        target: targetPeerId,
-                        candidate: e.candidate
-                    });
-                }
-            };
-
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-
-            signalChannel.postMessage({
-                type: 'WEBRTC_OFFER',
-                sender: state.peerId,
-                target: targetPeerId,
-                offer
-            });
-        }
-
-        async function handleWebRTCOffer(hostPeerId, offer) {
-            initAudioEngine();
-            const pc = new RTCPeerConnection(ICE_SERVERS);
-            peerConnections[hostPeerId] = pc;
-
-            pc.ontrack = (event) => {
-                const remoteAudio = new Audio();
-                remoteAudio.srcObject = event.streams[0];
-                remoteAudio.autoplay = true;
-                remoteAudio.play().catch(() => {
-                    showToast('Click anywhere on the page to unmute live stage audio', 'info');
-                });
-
-                // Hook remote stream into audience visualizer
-                const remoteSrc = audioCtx.createMediaStreamSource(event.streams[0]);
-                remoteSrc.connect(analyserNode);
-                document.getElementById('visualizer-overlay-text').classList.add('hidden');
-            };
-
-            pc.onicecandidate = (e) => {
-                if (e.candidate) {
-                    signalChannel.postMessage({
-                        type: 'WEBRTC_ICE',
-                        sender: state.peerId,
-                        target: hostPeerId,
-                        candidate: e.candidate
-                    });
-                }
-            };
-
-            await pc.setRemoteDescription(new RTCSessionDescription(offer));
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-
-            signalChannel.postMessage({
-                type: 'WEBRTC_ANSWER',
-                sender: state.peerId,
-                target: hostPeerId,
-                answer
-            });
-        }
-
-        /**
-         * ============================================================================
-         * REAL-TIME AUDIO FREQUENCY VISUALIZER
-         * ============================================================================
-         */
-        function startVisualizerLoop() {
-            const canvas = document.getElementById('audio-visualizer');
-            const ctx = canvas.getContext('2d');
-
-            function draw() {
-                if (!state.currentRoom) return;
-                requestAnimationFrame(draw);
-
-                canvas.width = canvas.offsetWidth;
-                canvas.height = canvas.offsetHeight;
-
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-                if (!analyserNode) return;
-                const bufferLength = analyserNode.frequencyBinCount;
-                const dataArray = new Uint8Array(bufferLength);
-                analyserNode.getByteFrequencyData(dataArray);
-
-                const barWidth = (canvas.width / bufferLength) * 1.8;
-                let x = 0;
-
-                for (let i = 0; i < bufferLength; i++) {
-                    const barHeight = (dataArray[i] / 255) * (canvas.height * 0.85);
-                    const gradient = ctx.createLinearGradient(0, canvas.height, 0, canvas.height - barHeight);
-                    gradient.addColorStop(0, '#7c3aed');
-                    gradient.addColorStop(0.5, '#d946ef');
-                    gradient.addColorStop(1, '#f59e0b');
-
-                    ctx.fillStyle = gradient;
-                    ctx.beginPath();
-                    ctx.roundRect(x, canvas.height - barHeight, Math.max(barWidth - 3, 2), barHeight, 4);
-                    ctx.fill();
-
-                    x += barWidth;
-                }
-            }
-            draw();
-        }
-
-        /**
-         * ============================================================================
-         * CHAT, REACTIONS & INVITE UTILITIES
-         * ============================================================================
-         */
-        function handleSendChat(e) {
-            e.preventDefault();
-            const input = document.getElementById('chat-input');
-            const text = input.value.trim();
-            if (!text || !state.currentRoom) return;
-
-            const isHost = state.role === 'host';
-            appendChatMessage(state.userName, text, isHost);
-
-            const chatPayload = {
-                type: 'CHAT_MESSAGE',
-                sender: state.peerId,
-                code: state.currentRoom.code,
-                author: state.userName,
-                text,
-                isHost
-            };
-            postSignal(chatPayload);
-            broadcastPeerData(chatPayload);
-            if (!isHost && peerDataConnections['host'] && peerDataConnections['host'].open) {
-                try { peerDataConnections['host'].send(chatPayload); } catch (err) { /* ignore */ }
-            }
-
-            input.value = '';
-        }
-
-        function appendChatMessage(author, text, isHost) {
-            const box = document.getElementById('chat-messages');
-            const div = document.createElement('div');
-            div.className = 'flex flex-col gap-0.5 bg-zinc-950/70 border border-zinc-800/80 rounded-2xl px-3.5 py-2.5';
-            div.innerHTML = `
-                <div class="flex items-center gap-1.5">
-                    <span class="text-xs font-bold ${isHost ? 'text-amber-400' : 'text-violet-300'}">${escapeHtml(author)}</span>
-                    ${isHost ? '<span class="text-[9px] uppercase px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold">Host</span>' : ''}
-                </div>
-                <p class="text-zinc-200 text-xs sm:text-sm break-words">${escapeHtml(text)}</p>
-            `;
-            box.appendChild(div);
-            box.scrollTop = box.scrollHeight;
-        }
-
-        function appendSystemMessage(text) {
-            const box = document.getElementById('chat-messages');
-            const div = document.createElement('div');
-            div.className = 'text-center text-[11px] text-zinc-500 py-1';
-            div.textContent = text;
-            box.appendChild(div);
-            box.scrollTop = box.scrollHeight;
-        }
-
-        function sendReaction(emoji) {
-            spawnFloatingEmoji(emoji);
-            if (state.currentRoom) {
-                const reactPayload = {
-                    type: 'REACTION',
-                    sender: state.peerId,
-                    code: state.currentRoom.code,
-                    emoji
-                };
-                postSignal(reactPayload);
-                broadcastPeerData(reactPayload);
-                if (state.role !== 'host' && peerDataConnections['host'] && peerDataConnections['host'].open) {
-                    try { peerDataConnections['host'].send(reactPayload); } catch (err) { /* ignore */ }
+            if (ytPlayer && typeof ytPlayer.getPlayerState === 'function') {
+                const playerState = ytPlayer.getPlayerState();
+                if (playerState === 1) {
+                    ytPlayer.pauseVideo();
+                    setYouTubePlayButtonUI(false);
+                    broadcastYouTubeSync('PAUSE', ytCurrentVideo);
+                } else {
+                    ytPlayer.playVideo();
+                    setYouTubePlayButtonUI(true);
+                    broadcastYouTubeSync('PLAY', ytCurrentVideo);
                 }
             }
         }
