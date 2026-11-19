@@ -10,6 +10,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- PeerJS for Cross-Tab / Cross-Device Serverless WebRTC Room Discovery & Audio -->
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
         body {
             font-family: 'Inter', sans-serif;
@@ -203,7 +205,11 @@
                         <i data-lucide="copy" class="w-4 h-4"></i>
                         <span class="hidden sm:inline">Copy Invite</span>
                     </button>
-                    <button onclick="leaveRoom()" class="p-2.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 transition flex items-center gap-1.5 text-xs font-medium">
+                    <button id="btn-end-event" onclick="endHostedEvent()" class="hidden p-2.5 rounded-lg bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-500/30 transition flex items-center gap-1.5 text-xs font-medium" title="Close Room Permanently">
+                        <i data-lucide="power" class="w-4 h-4"></i>
+                        <span class="hidden sm:inline">End Event</span>
+                    </button>
+                    <button onclick="leaveRoom()" class="p-2.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition flex items-center gap-1.5 text-xs font-medium">
                         <i data-lucide="log-out" class="w-4 h-4"></i>
                         <span>Leave</span>
                     </button>
@@ -627,7 +633,12 @@
                     Invalid Event Code or Password. Please check and try again.
                 </div>
 
-                <button type="submit" class="w-full py-3 rounded-xl font-bold text-sm bg-white text-zinc-950 hover:bg-zinc-200 transition shadow-lg">
+                <div id="join-status-msg" class="hidden text-xs text-violet-300 bg-violet-500/10 border border-violet-500/20 rounded-xl p-3 flex items-center gap-2">
+                    <span class="w-3.5 h-3.5 border-2 border-violet-400 border-t-transparent rounded-full animate-spin shrink-0"></span>
+                    <span id="join-status-text">Verifying Event Code & connecting to stage...</span>
+                </div>
+
+                <button type="submit" id="btn-join-submit" class="w-full py-3 rounded-xl font-bold text-sm bg-white text-zinc-950 hover:bg-zinc-200 transition shadow-lg">
                     Enter Stage as Listener
                 </button>
             </form>
@@ -749,59 +760,86 @@
                 }
             },
             {
-                code: 'COM-3104',
-                password: '1122',
+                code: 'STD-3019',
+                password: '9912',
                 title: 'Late Night Standup & Crowd Work',
-                host: 'Rohan Laughs',
+                host: 'Marcus Bell',
                 category: 'standup',
                 listeners: 34,
                 isDemo: true
             },
             {
-                code: 'POE-5590',
-                password: '9090',
-                title: 'Rainy Evening Urdu & English Poetry',
-                host: 'Kabir Verse',
+                code: 'POE-5521',
+                password: '7740',
+                title: 'Velvet Verses: Spoken Word & Poetry',
+                host: 'Elena Rostova',
                 category: 'poetry',
                 listeners: 12,
                 isDemo: true
             },
             {
-                code: 'JOK-7721',
-                password: '3344',
-                title: '2-Minute Rapid Fire Jokes Lounge',
-                host: 'Neha Comedy',
+                code: 'JOK-6184',
+                password: '2048',
+                title: 'One-Liners & Roast Battle Lounge',
+                host: 'Devon Brooks',
                 category: 'jokes',
-                listeners: 27,
+                listeners: 25,
                 isDemo: true
             }
         ];
 
-        const STORAGE_ROOMS_KEY = 'livestage_active_rooms_v1';
+        const STORAGE_ROOMS_KEY = 'livestage_active_rooms_v2';
+
+        function normalizeCode(code) {
+            return String(code || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+        }
+
+        function normalizePass(pass) {
+            return String(pass || '').trim();
+        }
+
+        function readWindowNameBackup() {
+            try {
+                if (window.name && window.name.startsWith('LIVESTAGE_ROOMS:')) {
+                    return JSON.parse(window.name.slice('LIVESTAGE_ROOMS:'.length));
+                }
+            } catch (e) { /* ignore */ }
+            return [];
+        }
 
         function loadSavedRooms() {
+            const merged = [...INITIAL_SAMPLE_ROOMS];
+            const sources = [];
             try {
-                const raw = localStorage.getItem(STORAGE_ROOMS_KEY);
-                if (!raw) return [...INITIAL_SAMPLE_ROOMS];
-                const parsed = JSON.parse(raw);
-                if (!Array.isArray(parsed)) return [...INITIAL_SAMPLE_ROOMS];
-                const merged = [...INITIAL_SAMPLE_ROOMS];
-                parsed.forEach(r => {
-                    if (r && r.code && !merged.some(m => m.code === r.code)) {
-                        merged.unshift(r);
+                const rawLocal = localStorage.getItem(STORAGE_ROOMS_KEY);
+                if (rawLocal) sources.push(JSON.parse(rawLocal));
+            } catch (e) { /* sandboxed iframe may block localStorage */ }
+            try {
+                const rawSession = sessionStorage.getItem(STORAGE_ROOMS_KEY);
+                if (rawSession) sources.push(JSON.parse(rawSession));
+            } catch (e) { /* ignore */ }
+            sources.push(readWindowNameBackup());
+
+            sources.forEach(list => {
+                if (!Array.isArray(list)) return;
+                list.forEach(r => {
+                    if (r && r.code) {
+                        const norm = normalizeCode(r.code);
+                        const idx = merged.findIndex(m => normalizeCode(m.code) === norm);
+                        if (idx > -1) merged[idx] = { ...merged[idx], ...r };
+                        else merged.unshift(r);
                     }
                 });
-                return merged;
-            } catch (e) {
-                return [...INITIAL_SAMPLE_ROOMS];
-            }
+            });
+            return merged;
         }
 
         function saveRoomsToStorage() {
-            try {
-                const customRooms = state.rooms.filter(r => !r.isDemo);
-                localStorage.setItem(STORAGE_ROOMS_KEY, JSON.stringify(customRooms));
-            } catch (e) { /* ignore storage quota errors */ }
+            const customRooms = state.rooms.filter(r => !r.isDemo);
+            const serialized = JSON.stringify(customRooms);
+            try { localStorage.setItem(STORAGE_ROOMS_KEY, serialized); } catch (e) { /* ignore */ }
+            try { sessionStorage.setItem(STORAGE_ROOMS_KEY, serialized); } catch (e) { /* ignore */ }
+            try { window.name = 'LIVESTAGE_ROOMS:' + serialized; } catch (e) { /* ignore */ }
         }
 
         // Application State
@@ -821,6 +859,8 @@
         };
 
         // Web Audio & WebRTC Globals
+        let hostPeerInstance = null;
+        const peerDataConnections = {};
         let audioCtx = null;
         let micStream = null;
         let micSourceNode = null;
@@ -858,7 +898,23 @@
         const ICE_SERVERS = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
         // BroadcastChannel for Real-Time Signaling & Room Discovery across browser tabs/windows
-        const signalChannel = new BroadcastChannel('livestage_signaling_v1');
+        let signalChannel = null;
+        try {
+            signalChannel = new BroadcastChannel('livestage_signaling_v2');
+        } catch (e) {
+            signalChannel = { postMessage: () => {}, onmessage: null };
+        }
+
+        function postSignal(payload) {
+            try { signalChannel.postMessage(payload); } catch (e) { /* ignore */ }
+        }
+
+        window.addEventListener('storage', (e) => {
+            if (e.key === STORAGE_ROOMS_KEY) {
+                state.rooms = loadSavedRooms();
+                renderRoomsGrid();
+            }
+        });
 
         /**
          * ============================================================================
@@ -874,7 +930,7 @@
             generateNewRoomCredentials();
 
             // Announce presence to discover live rooms from other tabs
-            signalChannel.postMessage({ type: 'DISCOVER_ROOMS', sender: state.peerId });
+            postSignal({ type: 'DISCOVER_ROOMS', sender: state.peerId });
         });
 
         // Listen for Cross-Tab BroadcastChannel Messages (Signaling, Rooms, Chat, Sync)
@@ -884,8 +940,11 @@
 
             switch (msg.type) {
                 case 'DISCOVER_ROOMS':
+                    state.rooms.filter(r => !r.isDemo).forEach(r => {
+                        postSignal({ type: 'ROOM_ANNOUNCEMENT', sender: state.peerId, room: r });
+                    });
                     if (state.currentRoom && state.role === 'host') {
-                        signalChannel.postMessage({
+                        postSignal({
                             type: 'ROOM_ANNOUNCEMENT',
                             sender: state.peerId,
                             room: state.currentRoom
@@ -893,46 +952,64 @@
                     }
                     break;
 
+                case 'QUERY_ROOM': {
+                    const targetNorm = normalizeCode(msg.code);
+                    const found = state.rooms.find(r => normalizeCode(r.code) === targetNorm);
+                    if (found) {
+                        postSignal({
+                            type: 'QUERY_ROOM_REPLY',
+                            sender: state.peerId,
+                            target: msg.sender,
+                            room: found
+                        });
+                    }
+                    break;
+                }
+
+                case 'QUERY_ROOM_REPLY':
+                    if (msg.room) upsertRoom(msg.room);
+                    break;
+
                 case 'ROOM_ANNOUNCEMENT':
                     upsertRoom(msg.room);
                     break;
 
                 case 'ROOM_CLOSED':
-                    state.rooms = state.rooms.filter(r => r.code !== msg.code);
+                    state.rooms = state.rooms.filter(r => normalizeCode(r.code) !== normalizeCode(msg.code));
                     saveRoomsToStorage();
                     renderRoomsGrid();
-                    if (state.currentRoom && state.currentRoom.code === msg.code && state.role === 'audience') {
+                    if (state.currentRoom && normalizeCode(state.currentRoom.code) === normalizeCode(msg.code) && state.role === 'audience') {
                         showToast('The host has ended the live event.', 'info');
                         leaveRoom();
                     }
                     break;
 
                 case 'CHAT_MESSAGE':
-                    if (state.currentRoom && msg.code === state.currentRoom.code) {
+                    if (state.currentRoom && normalizeCode(msg.code) === normalizeCode(state.currentRoom.code)) {
                         appendChatMessage(msg.author, msg.text, msg.isHost);
                     }
                     break;
 
                 case 'REACTION':
-                    if (state.currentRoom && msg.code === state.currentRoom.code) {
+                    if (state.currentRoom && normalizeCode(msg.code) === normalizeCode(msg.code)) {
                         spawnFloatingEmoji(msg.emoji);
                     }
                     break;
 
                 case 'KARAOKE_SYNC':
-                    if (state.currentRoom && msg.code === state.currentRoom.code && state.role === 'audience') {
+                    if (state.currentRoom && normalizeCode(msg.code) === normalizeCode(state.currentRoom.code) && state.role === 'audience') {
                         updateLyricPrompterUI(msg.prev, msg.current, msg.next);
                     }
                     break;
 
                 case 'YT_KARAOKE_SYNC':
-                    if (state.currentRoom && msg.code === state.currentRoom.code && state.role === 'audience') {
+                    if (state.currentRoom && normalizeCode(msg.code) === normalizeCode(state.currentRoom.code) && state.role === 'audience') {
                         handleAudienceYouTubeSync(msg);
                     }
                     break;
 
                 case 'PEER_JOINED':
-                    if (state.currentRoom && msg.code === state.currentRoom.code) {
+                    if (state.currentRoom && normalizeCode(msg.code) === normalizeCode(state.currentRoom.code)) {
                         appendSystemMessage(`${msg.userName} joined the audience.`);
                         updateListenerCount(1);
                         // If we are the Host, initiate WebRTC audio stream to the new listener!
@@ -965,9 +1042,11 @@
         };
 
         function upsertRoom(room) {
-            const idx = state.rooms.findIndex(r => r.code === room.code);
+            if (!room || !room.code) return;
+            const norm = normalizeCode(room.code);
+            const idx = state.rooms.findIndex(r => normalizeCode(r.code) === norm);
             if (idx > -1) {
-                state.rooms[idx] = room;
+                state.rooms[idx] = { ...state.rooms[idx], ...room };
             } else {
                 state.rooms.unshift(room);
             }
@@ -1106,7 +1185,144 @@
             document.getElementById('join-event-code').value = code;
             document.getElementById('join-event-pass').value = pass;
             document.getElementById('join-error-msg').classList.add('hidden');
+            document.getElementById('join-status-msg').classList.add('hidden');
             openModal('join-modal');
+        }
+
+        function registerPeerJSHostRoom(room) {
+            if (typeof Peer === 'undefined') return;
+            try {
+                if (hostPeerInstance) {
+                    hostPeerInstance.destroy();
+                    hostPeerInstance = null;
+                }
+                const deterministicHostId = 'livestage-room-' + normalizeCode(room.code);
+                const peer = new Peer(deterministicHostId, { debug: 0 });
+                hostPeerInstance = peer;
+
+                peer.on('connection', (conn) => {
+                    conn.on('data', (data) => {
+                        if (!data || typeof data !== 'object') return;
+                        if (data.type === 'AUTH_JOIN') {
+                            const validPass = normalizePass(data.password) === normalizePass(room.password);
+                            if (validPass) {
+                                peerDataConnections[conn.peer] = conn;
+                                conn.send({
+                                    type: 'AUTH_OK',
+                                    room: { ...room, activeYouTubeTrack: ytCurrentVideo }
+                                });
+                                appendSystemMessage(`${data.userName || 'Listener'} joined via Event Code.`);
+                                updateListenerCount(1);
+                                // Also stream mixed WebRTC studio audio to this listener via PeerJS MediaConnection
+                                if (masterStreamDestination && masterStreamDestination.stream) {
+                                    try { peer.call(conn.peer, masterStreamDestination.stream); } catch (e) { /* ignore */ }
+                                }
+                            } else {
+                                conn.send({ type: 'AUTH_FAIL' });
+                            }
+                        } else if (data.type === 'CHAT_MESSAGE') {
+                            appendChatMessage(data.author, data.text, false);
+                            broadcastPeerData(data, conn.peer);
+                        } else if (data.type === 'REACTION') {
+                            spawnFloatingEmoji(data.emoji);
+                            broadcastPeerData(data, conn.peer);
+                        }
+                    });
+                    conn.on('close', () => {
+                        delete peerDataConnections[conn.peer];
+                    });
+                });
+
+                peer.on('error', () => {
+                    // Gracefully fall back to local/BroadcastChannel registry if PeerJS cloud is unreachable
+                });
+            } catch (e) { /* ignore PeerJS init errors */ }
+        }
+
+        function broadcastPeerData(payload, excludePeerId = null) {
+            Object.entries(peerDataConnections).forEach(([pid, conn]) => {
+                if (pid !== excludePeerId && conn && conn.open) {
+                    try { conn.send(payload); } catch (e) { /* ignore */ }
+                }
+            });
+        }
+
+        function verifyViaPeerJS(normCode, pass, userName) {
+            return new Promise((resolve) => {
+                if (typeof Peer === 'undefined') {
+                    resolve(null);
+                    return;
+                }
+                let settled = false;
+                let clientPeer = null;
+                const finish = (result) => {
+                    if (settled) return;
+                    settled = true;
+                    if (!result && clientPeer) {
+                        try { clientPeer.destroy(); } catch (e) { /* ignore */ }
+                    }
+                    resolve(result);
+                };
+
+                const timeout = setTimeout(() => finish(null), 3200);
+
+                try {
+                    clientPeer = new Peer({ debug: 0 });
+                    clientPeer.on('open', () => {
+                        const conn = clientPeer.connect('livestage-room-' + normCode, { reliable: true });
+                        conn.on('open', () => {
+                            conn.send({ type: 'AUTH_JOIN', password: pass, userName });
+                        });
+                        conn.on('data', (data) => {
+                            if (data && data.type === 'AUTH_OK' && data.room) {
+                                clearTimeout(timeout);
+                                peerDataConnections['host'] = conn;
+                                // Listen for ongoing host sync events (chat, reactions, karaoke)
+                                conn.on('data', (msg) => {
+                                    if (!msg) return;
+                                    if (msg.type === 'CHAT_MESSAGE') appendChatMessage(msg.author, msg.text, msg.isHost);
+                                    if (msg.type === 'REACTION') spawnFloatingEmoji(msg.emoji);
+                                    if (msg.type === 'KARAOKE_SYNC') updateLyricPrompterUI(msg.prev, msg.current, msg.next);
+                                    if (msg.type === 'YT_KARAOKE_SYNC') handleAudienceYouTubeSync(msg);
+                                });
+                                finish({ room: data.room, clientPeer });
+                            } else if (data && data.type === 'AUTH_FAIL') {
+                                clearTimeout(timeout);
+                                finish({ authFailed: true });
+                            }
+                        });
+                        conn.on('error', () => {
+                            clearTimeout(timeout);
+                            finish(null);
+                        });
+                    });
+
+                    clientPeer.on('call', (call) => {
+                        call.answer();
+                        call.on('stream', (remoteStream) => {
+                            const remoteAudio = new Audio();
+                            remoteAudio.srcObject = remoteStream;
+                            remoteAudio.autoplay = true;
+                            remoteAudio.play().catch(() => {});
+                            if (audioCtx && analyserNode) {
+                                try {
+                                    const src = audioCtx.createMediaStreamSource(remoteStream);
+                                    src.connect(analyserNode);
+                                    document.getElementById('visualizer-overlay-text').classList.add('hidden');
+                                } catch (e) { /* ignore */ }
+                            }
+                        });
+                    });
+
+                    clientPeer.on('error', () => {
+                        clearTimeout(timeout);
+                        finish(null);
+                    });
+                } catch (e) {
+                    clearTimeout(timeout);
+                    finish(null);
+                }
+            });
         }
 
         function handleCreateEvent(e) {
@@ -1114,8 +1330,8 @@
             const hostName = document.getElementById('create-host-name').value.trim();
             const title = document.getElementById('create-event-title').value.trim();
             const category = document.getElementById('create-event-category').value;
-            const code = document.getElementById('preview-gen-code').textContent.trim();
-            const password = document.getElementById('create-event-pass').value.trim();
+            const code = document.getElementById('preview-gen-code').textContent.trim().toUpperCase();
+            const password = normalizePass(document.getElementById('create-event-pass').value);
 
             const newRoom = {
                 code,
@@ -1132,7 +1348,8 @@
             state.role = 'host';
 
             upsertRoom(newRoom);
-            signalChannel.postMessage({
+            registerPeerJSHostRoom(newRoom);
+            postSignal({
                 type: 'ROOM_ANNOUNCEMENT',
                 sender: state.peerId,
                 room: newRoom
@@ -1143,24 +1360,59 @@
             showToast(`Stage live! Share Code ${code} & Pass ${password}`, 'success');
         }
 
-        function handleJoinEvent(e) {
+        async function handleJoinEvent(e) {
             e.preventDefault();
             const userName = document.getElementById('join-user-name').value.trim();
-            const code = document.getElementById('join-event-code').value.trim().toUpperCase();
-            const pass = document.getElementById('join-event-pass').value.trim();
+            const rawCode = document.getElementById('join-event-code').value;
+            const normCode = normalizeCode(rawCode);
+            const pass = normalizePass(document.getElementById('join-event-pass').value);
 
-            // Refresh room list from localStorage in case another tab just hosted a room
+            const errorEl = document.getElementById('join-error-msg');
+            const statusEl = document.getElementById('join-status-msg');
+            const submitBtn = document.getElementById('btn-join-submit');
+
+            errorEl.classList.add('hidden');
+            statusEl.classList.remove('hidden');
+            submitBtn.disabled = true;
+
+            // Layer 1: Reload from localStorage, sessionStorage & window.name
             state.rooms = loadSavedRooms();
             renderRoomsGrid();
 
-            const targetRoom = state.rooms.find(
-                r => String(r.code).trim().toUpperCase() === code && String(r.password).trim() === pass
-            );
+            // Layer 2: Ask other tabs via BroadcastChannel & wait briefly if not yet in local list
+            let targetRoom = state.rooms.find(r => normalizeCode(r.code) === normCode);
             if (!targetRoom) {
-                document.getElementById('join-error-msg').classList.remove('hidden');
+                postSignal({ type: 'QUERY_ROOM', sender: state.peerId, code: normCode });
+                await new Promise(r => setTimeout(r, 350));
+                state.rooms = loadSavedRooms();
+                targetRoom = state.rooms.find(r => normalizeCode(r.code) === normCode);
+            }
+
+            // Check local match first
+            if (targetRoom && normalizePass(targetRoom.password) === pass) {
+                statusEl.classList.add('hidden');
+                submitBtn.disabled = false;
+                completeJoinRoom(targetRoom, userName);
+                // Also connect to Host PeerJS in background if available for cross-origin WebRTC audio
+                verifyViaPeerJS(normCode, pass, userName);
                 return;
             }
 
+            // Layer 3: Cross-Origin / Cross-Device PeerJS Host Verification
+            const peerResult = await verifyViaPeerJS(normCode, pass, userName);
+            statusEl.classList.add('hidden');
+            submitBtn.disabled = false;
+
+            if (peerResult && peerResult.room) {
+                upsertRoom(peerResult.room);
+                completeJoinRoom(peerResult.room, userName);
+                return;
+            }
+
+            errorEl.classList.remove('hidden');
+        }
+
+        function completeJoinRoom(targetRoom, userName) {
             document.getElementById('join-error-msg').classList.add('hidden');
             state.currentRoom = { ...targetRoom };
             state.userName = userName;
@@ -1170,7 +1422,7 @@
             enterStageView();
 
             // Notify host & room peers via BroadcastChannel
-            signalChannel.postMessage({
+            postSignal({
                 type: 'PEER_JOINED',
                 sender: state.peerId,
                 code: targetRoom.code,
@@ -1200,9 +1452,11 @@
             document.getElementById('display-event-pass').textContent = room.password;
 
             const roleBadge = document.getElementById('room-role-badge');
+            const endEventBtn = document.getElementById('btn-end-event');
             if (state.role === 'host') {
                 roleBadge.textContent = 'HOST STAGE';
                 roleBadge.className = 'px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30';
+                endEventBtn.classList.remove('hidden');
                 document.getElementById('host-mic-bar').classList.remove('hidden');
                 document.getElementById('audience-controls-bar').classList.add('hidden');
                 document.getElementById('vocal-fx-section').classList.remove('hidden');
@@ -1214,6 +1468,7 @@
             } else {
                 roleBadge.textContent = 'AUDIENCE LISTENER';
                 roleBadge.className = 'px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
+                endEventBtn.classList.add('hidden');
                 document.getElementById('host-mic-bar').classList.add('hidden');
                 document.getElementById('audience-controls-bar').classList.remove('hidden');
                 document.getElementById('vocal-fx-section').classList.add('hidden');
@@ -1245,12 +1500,13 @@
             lucide.createIcons();
 
             // Automatically start live YouTube karaoke audio stream if entering a featured Music room
-            if (room.category === 'music' && room.autoYouTubeTrack) {
+            const autoTrack = room.autoYouTubeTrack || room.activeYouTubeTrack;
+            if (room.category === 'music' && autoTrack) {
                 switchKaraokeSource('youtube');
                 // Allow listeners in featured music rooms to also test the Studio Mic & Vocal FX
                 document.getElementById('host-mic-bar').classList.remove('hidden');
                 document.getElementById('vocal-fx-section').classList.remove('hidden');
-                loadYouTubeKaraokeTrack(room.autoYouTubeTrack);
+                loadYouTubeKaraokeTrack(autoTrack);
             }
         }
 
@@ -1308,14 +1564,15 @@
             Object.values(peerConnections).forEach(pc => pc.close());
             for (const key in peerConnections) delete peerConnections[key];
 
+            // Keep hosted room active in the lobby & PeerJS registry so listeners (or you in another tab) can still join via Code & Password!
             if (state.currentRoom && state.role === 'host') {
-                signalChannel.postMessage({
-                    type: 'ROOM_CLOSED',
+                upsertRoom(state.currentRoom);
+                postSignal({
+                    type: 'ROOM_ANNOUNCEMENT',
                     sender: state.peerId,
-                    code: state.currentRoom.code
+                    room: state.currentRoom
                 });
-                state.rooms = state.rooms.filter(r => r.code !== state.currentRoom.code);
-                saveRoomsToStorage();
+                showToast(`Stepped out to lobby. Room ${state.currentRoom.code} is still open for joining!`, 'info');
             }
 
             state.currentRoom = null;
@@ -1326,6 +1583,25 @@
             document.getElementById('view-room').classList.add('hidden');
             document.getElementById('view-lobby').classList.remove('hidden');
             renderRoomsGrid();
+        }
+
+        function endHostedEvent() {
+            if (!state.currentRoom) return;
+            const closingCode = state.currentRoom.code;
+            if (hostPeerInstance) {
+                try { hostPeerInstance.destroy(); } catch (e) { /* ignore */ }
+                hostPeerInstance = null;
+            }
+            postSignal({
+                type: 'ROOM_CLOSED',
+                sender: state.peerId,
+                code: closingCode
+            });
+            state.rooms = state.rooms.filter(r => normalizeCode(r.code) !== normalizeCode(closingCode));
+            saveRoomsToStorage();
+            state.role = 'audience';
+            leaveRoom();
+            showToast(`Event ${closingCode} ended and removed from lobby.`, 'info');
         }
 
         /**
@@ -1592,14 +1868,16 @@
 
                     // Broadcast synced lyrics to audience listeners
                     if (state.currentRoom && state.role === 'host') {
-                        signalChannel.postMessage({
+                        const lyricPayload = {
                             type: 'KARAOKE_SYNC',
                             sender: state.peerId,
                             code: state.currentRoom.code,
                             prev,
                             current: curr,
                             next
-                        });
+                        };
+                        postSignal(lyricPayload);
+                        broadcastPeerData(lyricPayload);
                     }
                     state.lyricIndex++;
                 }
@@ -1975,14 +2253,16 @@
 
         function broadcastYouTubeSync(action, track) {
             if (state.currentRoom && state.role === 'host' && track) {
-                signalChannel.postMessage({
+                const syncPayload = {
                     type: 'YT_KARAOKE_SYNC',
                     sender: state.peerId,
                     code: state.currentRoom.code,
                     action,
                     track,
                     usingDirectAudio: ytUsingDirectAudio
-                });
+                };
+                postSignal(syncPayload);
+                broadcastPeerData(syncPayload);
             }
         }
 
@@ -2248,14 +2528,19 @@
             const isHost = state.role === 'host';
             appendChatMessage(state.userName, text, isHost);
 
-            signalChannel.postMessage({
+            const chatPayload = {
                 type: 'CHAT_MESSAGE',
                 sender: state.peerId,
                 code: state.currentRoom.code,
                 author: state.userName,
                 text,
                 isHost
-            });
+            };
+            postSignal(chatPayload);
+            broadcastPeerData(chatPayload);
+            if (!isHost && peerDataConnections['host'] && peerDataConnections['host'].open) {
+                try { peerDataConnections['host'].send(chatPayload); } catch (err) { /* ignore */ }
+            }
 
             input.value = '';
         }
@@ -2287,12 +2572,17 @@
         function sendReaction(emoji) {
             spawnFloatingEmoji(emoji);
             if (state.currentRoom) {
-                signalChannel.postMessage({
+                const reactPayload = {
                     type: 'REACTION',
                     sender: state.peerId,
                     code: state.currentRoom.code,
                     emoji
-                });
+                };
+                postSignal(reactPayload);
+                broadcastPeerData(reactPayload);
+                if (state.role !== 'host' && peerDataConnections['host'] && peerDataConnections['host'].open) {
+                    try { peerDataConnections['host'].send(reactPayload); } catch (err) { /* ignore */ }
+                }
             }
         }
 
